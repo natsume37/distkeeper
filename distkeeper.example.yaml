@@ -1,0 +1,44 @@
+schema_version: 1
+
+storage:
+  driver: oss
+  bucket: ${OSS_BUCKET}
+  region: cn-chengdu
+  prefix: ""
+  use_internal_endpoint: false
+
+repositories:
+  psygo:
+    artifact_name: psygo
+    channels:
+      - stable
+    targets:
+      android:
+        platform: android
+        arch: universal
+        extensions:
+          - .apk
+        content_type: application/vnd.android.package-archive
+        versioned_key: Android/{artifact}-{version}{extension}
+        latest_key: dist/{artifact}{extension}
+
+      windows-x64:
+        platform: windows
+        arch: x64
+        extensions:
+          - .exe
+          - .msi
+          - .zip
+        versioned_key: Windows/{artifact}-{version}-windows-x64{extension}
+        latest_key: dist/{artifact}-windows-x64{extension}
+
+      linux-x64:
+        platform: linux
+        arch: x64
+        extensions:
+          - .AppImage
+          - .deb
+          - .rpm
+          - .tar.gz
+        versioned_key: Linux/{artifact}-{version}-linux-x64{extension}
+        latest_key: dist/{artifact}-linux-x64{extension}
