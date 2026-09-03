@@ -1,0 +1,7 @@
+interface:
+  display_name: "Distkeeper Release Ops"
+  short_description: "规范 AI 驱动的 OSS 制品发布、测试与回滚"
+  default_prompt: "使用 $distkeeper-release-ops 执行一次安全的制品发布测试，并先输出计划。"
+
+policy:
+  allow_implicit_invocation: true
