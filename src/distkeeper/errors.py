@@ -9,6 +9,10 @@ class ConfigError(DistkeeperError):
     """The configuration is missing or invalid."""
 
 
+class SafetyError(DistkeeperError):
+    """A requested mutation falls outside the configured safety boundaries."""
+
+
 class ReleaseNotFoundError(DistkeeperError):
     """A requested artifact or release does not exist."""
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from distkeeper.cli import app
+from distkeeper.errors import SafetyError
 
 
 def test_cli_publish_list_and_verify_json(tmp_path: Path) -> None:
@@ -15,6 +16,13 @@ def test_cli_publish_list_and_verify_json(tmp_path: Path) -> None:
 storage:
   driver: local
   root: {tmp_path / "objects"}
+safety:
+  allowed_source_roots:
+    - {tmp_path}
+  allowed_write_prefixes:
+    - Android
+    - dist
+    - .distkeeper
 repositories:
   psygo:
     targets:
@@ -67,3 +75,59 @@ repositories:
     )
     assert verified.exit_code == 0, verified.output
     assert json.loads(verified.stdout)["ok"] is True
+
+
+def test_cli_requires_explicit_confirmation_outside_source_scope(tmp_path: Path) -> None:
+    config_path = tmp_path / "distkeeper.yaml"
+    config_path.write_text(
+        f"""
+storage:
+  driver: local
+  root: {tmp_path / "objects"}
+safety:
+  allowed_source_roots:
+    - {tmp_path / "dist"}
+  allowed_write_prefixes:
+    - dist
+    - .distkeeper
+repositories:
+  psygo:
+    targets:
+      android:
+        platform: android
+        extensions: [.apk]
+        versioned_key: dist/Android/{{artifact}}-{{version}}{{extension}}
+        latest_key: dist/Android/{{artifact}}{{extension}}
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "outside" / "psygo.apk"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"cli-release")
+    runner = CliRunner()
+    common = ["--config", str(config_path), "--json"]
+    arguments = [
+        "--repository",
+        "psygo",
+        "--target",
+        "android",
+        "--version",
+        "1.0.0",
+    ]
+
+    planned = runner.invoke(app, [*common, "plan", str(source), *arguments])
+    assert planned.exit_code == 0, planned.output
+    plan_payload = json.loads(planned.stdout)
+    assert plan_payload["requires_confirmation"] is True
+    assert any("outside allowed source roots" in item for item in plan_payload["scope_violations"])
+
+    blocked = runner.invoke(app, [*common, "publish", str(source), *arguments])
+    assert blocked.exit_code != 0
+    assert isinstance(blocked.exception, SafetyError)
+    assert "confirm-outside-scope" in str(blocked.exception)
+
+    confirmed = runner.invoke(
+        app,
+        [*common, "publish", str(source), *arguments, "--confirm-outside-scope"],
+    )
+    assert confirmed.exit_code == 0, confirmed.output

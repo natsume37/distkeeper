@@ -54,6 +54,11 @@ class OssStorage:
                 return None
             raise self._storage_error("stat", key, exc) from exc
         except oss.exceptions.BaseError as exc:
+            # SDK V2 可能将服务端 404 包装在 ResponseError/OperationError 中，
+            # 统一解包后再判断，避免“不存在”被误报为存储故障。
+            service_error = self._find_service_error(exc)
+            if service_error is not None and service_error.status_code == 404:
+                return None
             raise self._storage_error("stat", key, exc) from exc
         metadata = {
             str(name).lower(): str(value) for name, value in (result.metadata or {}).items()

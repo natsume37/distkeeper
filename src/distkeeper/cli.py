@@ -89,6 +89,13 @@ def publish(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate and preview without writing.")
     ] = False,
+    confirm_outside_scope: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-outside-scope",
+            help="Confirm a source or destination outside the configured allowlist.",
+        ),
+    ] = False,
 ) -> None:
     """Publish an immutable version and update its fixed latest path."""
     state, service = _service(ctx)
@@ -108,6 +115,7 @@ def publish(
         target=target,
         version=version,
         channel=channel,
+        confirm_outside_scope=confirm_outside_scope,
     )
     _emit_manifest(manifest, state, heading="Published")
 
@@ -125,6 +133,13 @@ def adopt(
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate and preview without writing.")
+    ] = False,
+    confirm_outside_scope: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-outside-scope",
+            help="Confirm a destination outside the configured allowlist.",
+        ),
     ] = False,
 ) -> None:
     """Archive an existing latest artifact as its first managed version."""
@@ -144,6 +159,7 @@ def adopt(
         target=target,
         version=version,
         channel=channel,
+        confirm_outside_scope=confirm_outside_scope,
         extension=extension,
     )
     _emit_manifest(manifest, state, heading="Adopted")
@@ -217,6 +233,13 @@ def rollback(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate and preview without writing.")
     ] = False,
+    confirm_outside_scope: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-outside-scope",
+            help="Confirm a destination outside the configured allowlist.",
+        ),
+    ] = False,
 ) -> None:
     """Point the fixed latest path at a previous immutable version."""
     state, service = _service(ctx)
@@ -234,6 +257,7 @@ def rollback(
         target=target,
         version=version,
         channel=channel,
+        confirm_outside_scope=confirm_outside_scope,
     )
     _emit_manifest(manifest, state, heading="Rolled back")
 
@@ -290,6 +314,8 @@ def _emit_plan(plan_result: OperationPlan, state: CliState) -> None:
                 "target": plan_result.target,
                 "version": plan_result.version,
                 "actions": plan_result.actions,
+                "scope_violations": plan_result.scope_violations,
+                "requires_confirmation": plan_result.requires_confirmation,
             }
         )
         return
@@ -299,6 +325,10 @@ def _emit_plan(plan_result: OperationPlan, state: CliState) -> None:
     )
     for index, action in enumerate(plan_result.actions, start=1):
         console.print(f"  {index}. {action}")
+    if plan_result.scope_violations:
+        console.print("[yellow]Confirmation required for out-of-scope paths:[/yellow]")
+        for violation in plan_result.scope_violations:
+            console.print(f"  - {violation}")
 
 
 def _emit_manifest(manifest: ReleaseManifest, state: CliState, *, heading: str) -> None:

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from distkeeper.config import AppConfig, ResolvedTarget, validate_object_key
 from distkeeper.domain import (
+    ArtifactPaths,
     ArtifactRecord,
     OperationPlan,
     PreparedArtifact,
@@ -25,6 +26,7 @@ from distkeeper.errors import (
     IntegrityError,
     ObjectAlreadyExistsError,
     ReleaseNotFoundError,
+    SafetyError,
 )
 from distkeeper.storage.base import ObjectInfo, Storage, read_object
 
@@ -70,6 +72,7 @@ class ReleaseService:
             channel=channel,
         )
         candidate = self._manifest_for_prepared(prepared)
+        scope_violations = self._scope_violations(source=prepared.source, paths=prepared.paths)
         actions: list[str] = []
 
         existing_artifact = self._storage.stat(prepared.paths.versioned)
@@ -105,6 +108,7 @@ class ReleaseService:
             target=target,
             version=version,
             actions=tuple(actions),
+            scope_violations=scope_violations,
         )
 
     def publish(
@@ -115,7 +119,12 @@ class ReleaseService:
         target: str,
         version: str,
         channel: str = "stable",
+        confirm_outside_scope: bool = False,
     ) -> ReleaseManifest:
+        self._require_scope(
+            self._source_scope_violations(source),
+            confirmed=confirm_outside_scope,
+        )
         prepared = self._prepare_local_artifact(
             source,
             repository=repository,
@@ -124,6 +133,10 @@ class ReleaseService:
             channel=channel,
         )
         candidate = self._manifest_for_prepared(prepared)
+        self._require_scope(
+            self._scope_violations(source=prepared.source, paths=prepared.paths),
+            confirmed=confirm_outside_scope,
+        )
         metadata = self._metadata(candidate)
         self._assert_local_source_unchanged(prepared)
 
@@ -186,6 +199,7 @@ class ReleaseService:
         resolved = self._config.resolve(repository, target, channel)
         extension = resolved.validate_extension(extension)
         paths = resolved.paths(version, extension)
+        scope_violations = self._scope_violations(source=None, paths=paths)
         latest = self._storage.stat(paths.latest)
         if latest is None:
             raise ReleaseNotFoundError(f"latest artifact does not exist: {paths.latest}")
@@ -222,6 +236,7 @@ class ReleaseService:
             target=target,
             version=version,
             actions=actions,
+            scope_violations=scope_violations,
         )
 
     def adopt(
@@ -232,10 +247,15 @@ class ReleaseService:
         version: str,
         channel: str = "stable",
         extension: str | None = None,
+        confirm_outside_scope: bool = False,
     ) -> ReleaseManifest:
         resolved = self._config.resolve(repository, target, channel)
         extension = resolved.validate_extension(extension)
         paths = resolved.paths(version, extension)
+        self._require_scope(
+            self._scope_violations(source=None, paths=paths),
+            confirmed=confirm_outside_scope,
+        )
         latest = self._storage.stat(paths.latest)
         if latest is None:
             raise ReleaseNotFoundError(f"latest artifact does not exist: {paths.latest}")
@@ -312,6 +332,7 @@ class ReleaseService:
             channel=channel,
         )
         paths = resolved.paths(version, manifest.artifact.extension)
+        scope_violations = self._scope_violations(source=None, paths=paths)
         source = self._storage.stat(manifest.artifact.key)
         if source is None:
             raise ReleaseNotFoundError(
@@ -332,6 +353,7 @@ class ReleaseService:
                 f"copy immutable artifact to latest: {manifest.artifact.key} -> {paths.latest}",
                 f"write latest manifest: {paths.latest_manifest}",
             ),
+            scope_violations=scope_violations,
         )
 
     def rollback(
@@ -341,12 +363,18 @@ class ReleaseService:
         target: str,
         version: str,
         channel: str = "stable",
+        confirm_outside_scope: bool = False,
     ) -> ReleaseManifest:
         resolved, manifest = self._release_by_version(
             repository=repository,
             target=target,
             version=version,
             channel=channel,
+        )
+        paths = resolved.paths(version, manifest.artifact.extension)
+        self._require_scope(
+            self._scope_violations(source=None, paths=paths),
+            confirmed=confirm_outside_scope,
         )
         source = self._storage.stat(manifest.artifact.key)
         if source is None:
@@ -360,7 +388,6 @@ class ReleaseService:
             full_hash=False,
         )
 
-        paths = resolved.paths(version, manifest.artifact.extension)
         updated_artifact = manifest.artifact.model_copy(update={"latest_key": paths.latest})
         active_manifest = manifest.model_copy(
             update={
@@ -471,6 +498,54 @@ class ReleaseService:
             sha256=digest,
             source_fingerprint=after_hash,
             paths=paths,
+        )
+
+    def _scope_violations(
+        self,
+        *,
+        source: Path | None,
+        paths: ArtifactPaths,
+    ) -> tuple[str, ...]:
+        """Return every source or destination that falls outside the configured allowlist."""
+        violations = list(self._source_scope_violations(source)) if source is not None else []
+
+        for label, key in (
+            ("versioned artifact", paths.versioned),
+            ("latest artifact", paths.latest),
+            ("version manifest", paths.version_manifest),
+            ("latest manifest", paths.latest_manifest),
+        ):
+            if not self._key_is_allowed_for_write(key):
+                prefixes = ", ".join(self._config.safety.allowed_write_prefixes)
+                violations.append(
+                    f"{label} key {key!r} is outside allowed write prefixes: {prefixes}"
+                )
+        return tuple(violations)
+
+    def _source_scope_violations(self, source: Path) -> tuple[str, ...]:
+        source_path = source.expanduser().resolve()
+        allowed_roots = tuple(
+            root.expanduser().resolve() for root in self._config.safety.allowed_source_roots
+        )
+        if any(source_path.is_relative_to(root) for root in allowed_roots):
+            return ()
+        roots = ", ".join(str(root) for root in allowed_roots)
+        return (f"source file {source_path} is outside allowed source roots: {roots}",)
+
+    def _key_is_allowed_for_write(self, key: str) -> bool:
+        return any(
+            key == prefix or key.startswith(f"{prefix}/")
+            for prefix in self._config.safety.allowed_write_prefixes
+        )
+
+    @staticmethod
+    def _require_scope(violations: tuple[str, ...], *, confirmed: bool) -> None:
+        if not violations or confirmed:
+            return
+        details = "\n".join(f"  - {violation}" for violation in violations)
+        raise SafetyError(
+            "operation is outside the configured safety scope; review plan and "
+            "rerun with --confirm-outside-scope:\n" + details
         )
 
     def _manifest_for_prepared(self, prepared: PreparedArtifact) -> ReleaseManifest:

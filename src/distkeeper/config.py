@@ -112,6 +112,48 @@ type StorageConfig = Annotated[
 ]
 
 
+class SafetyConfig(BaseModel):
+    """Filesystem and object-key boundaries for mutating release operations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_source_roots: tuple[Path, ...] = (Path("dist"),)
+    allowed_write_prefixes: tuple[str, ...] = ("dist", ".distkeeper")
+
+    @field_validator("allowed_source_roots")
+    @classmethod
+    def validate_source_roots(cls, values: tuple[Path, ...]) -> tuple[Path, ...]:
+        if not values:
+            raise ValueError("allowed_source_roots must not be empty")
+        normalized: list[Path] = []
+        for root in values:
+            expanded = root.expanduser()
+            if expanded == Path(".") or expanded == Path(expanded.anchor or "."):
+                raise ValueError("allowed_source_roots must not contain the filesystem root")
+            if ".." in expanded.parts:
+                raise ValueError(f"allowed_source_root contains an unsafe path: {root!s}")
+            if expanded in normalized:
+                raise ValueError(f"duplicate allowed_source_root: {root!s}")
+            normalized.append(expanded)
+        return tuple(normalized)
+
+    @field_validator("allowed_write_prefixes")
+    @classmethod
+    def validate_write_prefixes(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if not values:
+            raise ValueError("allowed_write_prefixes must not be empty")
+        normalized: list[str] = []
+        for value in values:
+            try:
+                prefix = normalize_prefix(value)
+            except ConfigError as exc:
+                raise ValueError(str(exc)) from exc
+            if prefix in normalized:
+                raise ValueError(f"duplicate allowed_write_prefix: {value!r}")
+            normalized.append(prefix)
+        return tuple(normalized)
+
+
 class TargetConfig(BaseModel):
     """Configuration for one deliverable, such as android-apk or windows-x64."""
 
@@ -254,6 +296,7 @@ class AppConfig(BaseModel):
 
     schema_version: Literal[1] = 1
     storage: StorageConfig
+    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     repositories: dict[str, RepositoryConfig]
 
     @field_validator("repositories")
@@ -425,6 +468,15 @@ def load_config(path: Path) -> AppConfig:
         config = AppConfig.model_validate(_expand_environment(raw))
     except ValidationError as exc:
         raise ConfigError(f"invalid configuration:\n{exc}") from exc
+    source_roots = tuple(
+        (resolved_path.parent / root).resolve()
+        if not root.is_absolute()
+        else root.expanduser().resolve()
+        for root in config.safety.allowed_source_roots
+    )
+    config = config.model_copy(
+        update={"safety": config.safety.model_copy(update={"allowed_source_roots": source_roots})}
+    )
     if isinstance(config.storage, LocalStorageConfig) and not config.storage.root.is_absolute():
         storage = config.storage.model_copy(
             update={"root": (resolved_path.parent / config.storage.root).resolve()}

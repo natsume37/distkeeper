@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import alibabacloud_oss_v2 as oss
 import pytest
 
 from distkeeper.config import OssStorageConfig
@@ -85,6 +86,28 @@ class FakeOssClient:
             is_truncated=False,
             next_continuation_token=None,
         )
+
+
+class MissingObjectOssClient(FakeOssClient):
+    def head_object(self, request: Any) -> SimpleNamespace:
+        del request
+        service_error = oss.exceptions.ServiceError(
+            status_code=404,
+            code="NoSuchKey",
+            request_id="test-request",
+            message="missing",
+            ec="test",
+            timestamp="now",
+            request_target="HEAD /missing",
+        )
+        raise oss.exceptions.ResponseError(error=service_error)
+
+
+def test_oss_stat_treats_wrapped_not_found_as_missing() -> None:
+    config = OssStorageConfig(driver="oss", bucket="example-bucket", region="cn-chengdu")
+    storage = OssStorage(config, client=MissingObjectOssClient())
+
+    assert storage.stat("missing/object.apk") is None
 
 
 def test_oss_driver_applies_prefix_metadata_and_copy_precondition(tmp_path: Path) -> None:

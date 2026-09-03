@@ -5,16 +5,27 @@ from pathlib import Path
 import pytest
 
 from distkeeper.config import AppConfig
-from distkeeper.errors import ConflictError
+from distkeeper.errors import ConflictError, SafetyError
 from distkeeper.service import ReleaseService
 from distkeeper.storage.local import LocalStorage
 
 
-def build_config(storage_root: Path) -> AppConfig:
+def build_config(
+    storage_root: Path,
+    *,
+    source_root: Path | None = None,
+    versioned_key: str = "Android/{artifact}-{version}{extension}",
+    latest_key: str = "dist/{artifact}{extension}",
+    write_prefixes: tuple[str, ...] = ("Android", "dist", ".distkeeper"),
+) -> AppConfig:
     return AppConfig.model_validate(
         {
             "schema_version": 1,
             "storage": {"driver": "local", "root": storage_root},
+            "safety": {
+                "allowed_source_roots": [source_root or storage_root.parent],
+                "allowed_write_prefixes": list(write_prefixes),
+            },
             "repositories": {
                 "psygo": {
                     "artifact_name": "psygo",
@@ -24,8 +35,8 @@ def build_config(storage_root: Path) -> AppConfig:
                             "platform": "android",
                             "extensions": [".apk"],
                             "content_type": "application/vnd.android.package-archive",
-                            "versioned_key": "Android/{artifact}-{version}{extension}",
-                            "latest_key": "dist/{artifact}{extension}",
+                            "versioned_key": versioned_key,
+                            "latest_key": latest_key,
                         }
                     },
                 }
@@ -40,6 +51,7 @@ def build_service(storage_root: Path) -> ReleaseService:
 
 
 def write_artifact(path: Path, content: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return path
 
@@ -150,3 +162,124 @@ def test_plan_does_not_create_storage_root(tmp_path: Path) -> None:
 
     assert plan.operation == "publish"
     assert not storage_root.exists()
+
+
+def test_plan_reports_source_outside_allowlist_without_writing(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    allowed_root = tmp_path / "allowed"
+    config = build_config(storage_root, source_root=allowed_root)
+    service = ReleaseService(config, LocalStorage(storage_root))
+    source = write_artifact(tmp_path / "outside" / "psygo.apk", b"planned")
+
+    plan = service.plan_publish(
+        source,
+        repository="psygo",
+        target="android",
+        version="1.2.3",
+    )
+
+    assert plan.requires_confirmation
+    assert any("outside allowed source roots" in item for item in plan.scope_violations)
+    assert not storage_root.exists()
+
+
+def test_publish_rejects_source_outside_allowlist_before_writing(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    config = build_config(storage_root, source_root=tmp_path / "allowed")
+    service = ReleaseService(config, LocalStorage(storage_root))
+    source = write_artifact(tmp_path / "outside.apk", b"release")
+
+    with pytest.raises(SafetyError, match="outside allowed source roots"):
+        service.publish(source, repository="psygo", target="android", version="1.0.0")
+
+    assert not storage_root.exists()
+
+
+def test_publish_allows_explicit_confirmation_for_outside_source(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    config = build_config(storage_root, source_root=tmp_path / "allowed")
+    service = ReleaseService(config, LocalStorage(storage_root))
+    source = write_artifact(tmp_path / "outside.apk", b"release")
+
+    service.publish(
+        source,
+        repository="psygo",
+        target="android",
+        version="1.0.0",
+        confirm_outside_scope=True,
+    )
+
+    assert (storage_root / "Android/psygo-1.0.0.apk").is_file()
+
+
+def test_publish_rejects_destination_outside_allowlist(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    config = build_config(
+        storage_root,
+        versioned_key="distful/{artifact}-{version}{extension}",
+    )
+    service = ReleaseService(config, LocalStorage(storage_root))
+    source = write_artifact(tmp_path / "psygo.apk", b"release")
+
+    with pytest.raises(SafetyError, match="versioned artifact key"):
+        service.publish(source, repository="psygo", target="android", version="1.0.0")
+
+    assert not storage_root.exists()
+
+
+def test_adopt_requires_confirmation_for_out_of_scope_destination(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    config = build_config(
+        storage_root,
+        versioned_key="legacy/{artifact}-{version}{extension}",
+    )
+    latest = storage_root / "dist/psygo.apk"
+    latest.parent.mkdir(parents=True)
+    latest.write_bytes(b"existing-release")
+    service = ReleaseService(config, LocalStorage(storage_root))
+
+    plan = service.plan_adopt(repository="psygo", target="android", version="1.0.0")
+    assert plan.requires_confirmation
+
+    with pytest.raises(SafetyError, match="versioned artifact key"):
+        service.adopt(repository="psygo", target="android", version="1.0.0")
+
+    adopted = service.adopt(
+        repository="psygo",
+        target="android",
+        version="1.0.0",
+        confirm_outside_scope=True,
+    )
+    assert adopted.origin == "adopt"
+    assert (storage_root / "legacy/psygo-1.0.0.apk").is_file()
+
+
+def test_rollback_requires_confirmation_for_out_of_scope_destination(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    config = build_config(
+        storage_root,
+        versioned_key="legacy/{artifact}-{version}{extension}",
+    )
+    service = ReleaseService(config, LocalStorage(storage_root))
+    source = write_artifact(tmp_path / "psygo.apk", b"release")
+    service.publish(
+        source,
+        repository="psygo",
+        target="android",
+        version="1.0.0",
+        confirm_outside_scope=True,
+    )
+
+    plan = service.plan_rollback(repository="psygo", target="android", version="1.0.0")
+    assert plan.requires_confirmation
+
+    with pytest.raises(SafetyError, match="versioned artifact key"):
+        service.rollback(repository="psygo", target="android", version="1.0.0")
+
+    rolled_back = service.rollback(
+        repository="psygo",
+        target="android",
+        version="1.0.0",
+        confirm_outside_scope=True,
+    )
+    assert rolled_back.activation == "rollback"

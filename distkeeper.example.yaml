@@ -7,6 +7,14 @@ storage:
   prefix: ""
   use_internal_endpoint: false
 
+# 发布源文件只允许来自配置文件旁的 dist/；清单由工具写入 .distkeeper/。
+safety:
+  allowed_source_roots:
+    - dist
+  allowed_write_prefixes:
+    - dist
+    - .distkeeper
+
 repositories:
   psygo:
     artifact_name: psygo
@@ -19,8 +27,8 @@ repositories:
         extensions:
           - .apk
         content_type: application/vnd.android.package-archive
-        versioned_key: Android/{artifact}-{version}{extension}
-        latest_key: dist/{artifact}{extension}
+        versioned_key: dist/Android/{artifact}-{version}{extension}
+        latest_key: dist/Android/{artifact}{extension}
 
       windows-x64:
         platform: windows
@@ -29,8 +37,8 @@ repositories:
           - .exe
           - .msi
           - .zip
-        versioned_key: Windows/{artifact}-{version}-windows-x64{extension}
-        latest_key: dist/{artifact}-windows-x64{extension}
+        versioned_key: dist/Windows/{artifact}-{version}-windows-x64{extension}
+        latest_key: dist/Windows/{artifact}-windows-x64{extension}
 
       linux-x64:
         platform: linux
@@ -40,5 +48,5 @@ repositories:
           - .deb
           - .rpm
           - .tar.gz
-        versioned_key: Linux/{artifact}-{version}-linux-x64{extension}
-        latest_key: dist/{artifact}-linux-x64{extension}
+        versioned_key: dist/Linux/{artifact}-{version}-linux-x64{extension}
+        latest_key: dist/Linux/{artifact}-linux-x64{extension}

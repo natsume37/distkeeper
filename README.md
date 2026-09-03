@@ -30,7 +30,7 @@ export OSS_BUCKET='your-bucket'
 
 ## 发布流程
 
-首次接管已经存在的 `dist/psygo.apk`：
+首次接管已经存在的 `dist/Android/psygo.apk`：
 
 ```bash
 uv run distkeeper adopt \
@@ -42,10 +42,10 @@ uv run distkeeper adopt \
 预览和发布新版本：
 
 ```bash
-uv run distkeeper plan ./psygo.apk \
+uv run distkeeper plan dist/psygo.apk \
   --repository psygo --target android --version 0.2.39
 
-uv run distkeeper publish ./psygo.apk \
+uv run distkeeper publish dist/psygo.apk \
   --repository psygo --target android --version 0.2.39
 ```
 
@@ -66,3 +66,5 @@ uv run distkeeper rollback \
 不要绕过工具直接覆盖 `dist`。建议同时开启 OSS Bucket 版本控制，将其作为误覆盖后的恢复保障。
 
 同一个 `repository + target + channel` 应保持单发布者；在 CI 中使用 concurrency group 或等价机制串行化发布。OSS 开启 Bucket 版本控制后会忽略禁止覆盖请求头，因此版本控制负责灾难恢复，CI 串行化负责避免并发发布竞争。
+
+默认安全边界是：本地发布文件来自配置文件旁的 `dist/`，OSS 制品写入 `dist/`，内部清单写入 `.distkeeper/`。如果源文件或目标键超出白名单，先查看 `plan`，确认无误后在变更命令中显式添加 `--confirm-outside-scope`。

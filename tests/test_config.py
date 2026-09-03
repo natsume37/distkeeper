@@ -110,3 +110,27 @@ repositories:
 
     assert isinstance(config.storage, LocalStorageConfig)
     assert config.storage.root == (tmp_path / "objects").resolve()
+    assert config.safety.allowed_source_roots == ((tmp_path / "dist").resolve(),)
+    assert config.safety.allowed_write_prefixes == ("dist", ".distkeeper")
+
+
+def test_safety_rejects_unsafe_source_root() -> None:
+    with pytest.raises(ValidationError, match="unsafe path"):
+        AppConfig.model_validate(
+            {
+                "storage": {"driver": "local", "root": "objects"},
+                "safety": {"allowed_source_roots": ["../outside"]},
+                "repositories": {
+                    "psygo": {
+                        "targets": {
+                            "android": {
+                                "platform": "android",
+                                "extensions": [".apk"],
+                                "versioned_key": "dist/{artifact}-{version}{extension}",
+                                "latest_key": "dist/{artifact}{extension}",
+                            }
+                        }
+                    }
+                },
+            }
+        )

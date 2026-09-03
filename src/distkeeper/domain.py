@@ -88,6 +88,12 @@ class OperationPlan:
     target: str
     version: str
     actions: tuple[str, ...]
+    scope_violations: tuple[str, ...] = ()
+
+    @property
+    def requires_confirmation(self) -> bool:
+        """Whether the plan needs an explicit out-of-scope confirmation."""
+        return bool(self.scope_violations)
 
 
 @dataclass(frozen=True, slots=True)
