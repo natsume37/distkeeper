@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +52,23 @@ class ReleaseManifest(BaseModel):
         return cls.model_validate_json(data)
 
 
+class ReleaseStatus(BaseModel):
+    """Machine-readable release state for one repository target and channel."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    repository: str
+    target: str
+    channel: str
+    state: Literal["empty", "ready", "degraded"]
+    current: ReleaseManifest | None
+    previous: ReleaseManifest | None
+    available_versions: tuple[str, ...]
+    current_versioned_exists: bool | None
+    current_latest_exists: bool | None
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactPaths:
     """All object keys involved in one release."""
@@ -89,6 +107,34 @@ class OperationPlan:
     version: str
     actions: tuple[str, ...]
     scope_violations: tuple[str, ...] = ()
+    expected_current_version: str | None = None
+    expected_current_etag: str | None = None
+    source_sha256: str | None = None
+    source_size: int | None = None
+    plan_id: str = ""
+
+    schema_version: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        """Derive a stable identifier so an AI can apply the exact plan it inspected."""
+        if self.plan_id:
+            return
+        payload = {
+            "schema_version": self.schema_version,
+            "operation": self.operation,
+            "repository": self.repository,
+            "target": self.target,
+            "version": self.version,
+            "actions": self.actions,
+            "scope_violations": self.scope_violations,
+            "expected_current_version": self.expected_current_version,
+            "expected_current_etag": self.expected_current_etag,
+            "source_sha256": self.source_sha256,
+            "source_size": self.source_size,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        object.__setattr__(self, "plan_id", f"plan_{digest[:24]}")
 
     @property
     def requires_confirmation(self) -> bool:

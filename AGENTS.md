@@ -12,11 +12,11 @@ task explicitly requires one.
 
 This is a Python 3.12+ CLI for versioning release artifacts in object storage.
 Application code lives under `src/distkeeper/`: `service.py` contains publish,
-adopt, rollback, and verification workflows; `config.py` validates YAML and path
-templates; `directory.py` provides storage tree queries; and `storage/` contains
-the provider protocol plus local and Alibaba Cloud OSS implementations. The CLI
-entry point is `cli.py` (also available via `python -m distkeeper`). Tests are in
-`tests/`, with one `test_*.py` file per major module. Use
+adopt, rollback, status, and verification workflows; `config.py` validates YAML
+and path templates; `directory.py` provides storage tree queries; and `storage/`
+contains the provider protocol plus local and Alibaba Cloud OSS implementations.
+The CLI entry point is `cli.py` (also available via `python -m distkeeper`).
+Tests are in `tests/`, with one `test_*.py` file per major module. Use
 `distkeeper.example.yaml` as the configuration template.
 
 ## Build, Test, and Development Commands
@@ -32,7 +32,20 @@ entry point is `cli.py` (also available via `python -m distkeeper`). Tests are i
 For automation and AI callers, prefer `distkeeper --json ...` for
 machine-readable results. Keep credentials in environment variables such as
 `OSS_ACCESS_KEY_ID`, `OSS_ACCESS_KEY_SECRET`, and `OSS_BUCKET`; never place them
-in YAML or commits.
+in YAML or commits. `status` reports the active and previous versions. For
+`publish` and `rollback`, run a plan first, retain its `plan_id`, and pass it to
+the mutating command; use `--expected-current-version` when applying an
+explicit optimistic check. JSON errors include stable `code` and `retryable`
+fields, so retry only errors marked retryable and re-plan on conflicts.
+
+## AI Operation Workflow
+
+Before a mutation, inspect `--json status`, then run `plan` or
+`rollback --dry-run`. Apply the exact result with `--plan-id` and run
+`verify` afterward. Plan checks bind the source SHA-256 and the observed latest
+version/object fingerprint, but they are execution-time checks rather than a
+distributed lock; serialize publishers for the same repository, target, and
+channel.
 
 ## Safety Boundaries
 

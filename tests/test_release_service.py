@@ -106,6 +106,11 @@ def test_publish_list_and_rollback(tmp_path: Path) -> None:
     assert [release.version for release in releases] == ["0.2.39", "0.2.38"]
     assert (storage_root / "dist/psygo.apk").read_bytes() == b"release-0.2.39"
 
+    status = service.status(repository="psygo", target="android")
+    assert status.state == "ready"
+    assert status.current is not None and status.current.version == "0.2.39"
+    assert status.previous is not None and status.previous.version == "0.2.38"
+
     active = service.rollback(
         repository="psygo",
         target="android",
@@ -114,6 +119,59 @@ def test_publish_list_and_rollback(tmp_path: Path) -> None:
     assert active.activation == "rollback"
     assert (storage_root / "dist/psygo.apk").read_bytes() == b"release-0.2.38"
     assert service.verify(repository="psygo", target="android").ok
+
+    rolled_back_status = service.status(repository="psygo", target="android")
+    assert rolled_back_status.current is not None
+    assert rolled_back_status.current.version == "0.2.38"
+    assert rolled_back_status.previous is not None
+    assert rolled_back_status.previous.version == "0.2.39"
+
+
+def test_plan_id_rejects_a_changed_latest_release(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    service = build_service(storage_root)
+    source = tmp_path / "psygo.apk"
+    source.write_bytes(b"release-0.2.38")
+    service.publish(source, repository="psygo", target="android", version="0.2.38")
+
+    rollback_plan = service.plan_rollback(
+        repository="psygo",
+        target="android",
+        version="0.2.38",
+    )
+    source.write_bytes(b"release-0.2.39")
+    service.publish(source, repository="psygo", target="android", version="0.2.39")
+
+    with pytest.raises(ConflictError, match="stale"):
+        service.rollback(
+            repository="psygo",
+            target="android",
+            version="0.2.38",
+            plan_id=rollback_plan.plan_id,
+        )
+
+
+def test_plan_id_rejects_changed_publish_input(tmp_path: Path) -> None:
+    storage_root = tmp_path / "objects"
+    service = build_service(storage_root)
+    source = tmp_path / "psygo.apk"
+    source.write_bytes(b"release-content")
+    publish_plan = service.plan_publish(
+        source,
+        repository="psygo",
+        target="android",
+        version="0.2.38",
+    )
+    source.write_bytes(b"different-content")
+
+    with pytest.raises(ConflictError, match="stale"):
+        service.publish(
+            source,
+            repository="psygo",
+            target="android",
+            version="0.2.38",
+            plan_id=publish_plan.plan_id,
+        )
 
 
 def test_adopt_archives_existing_latest_without_removing_it(tmp_path: Path) -> None:

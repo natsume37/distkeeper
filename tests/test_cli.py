@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
-from distkeeper.cli import app
-from distkeeper.errors import SafetyError
+from distkeeper.cli import _exit_with_error, app
+from distkeeper.errors import ConflictError, SafetyError
 
 
 def test_cli_publish_list_and_verify_json(tmp_path: Path) -> None:
@@ -76,6 +77,16 @@ repositories:
     assert verified.exit_code == 0, verified.output
     assert json.loads(verified.stdout)["ok"] is True
 
+    status = runner.invoke(
+        app,
+        [*common, "status", "--repository", "psygo", "--target", "android"],
+    )
+    assert status.exit_code == 0, status.output
+    status_payload = json.loads(status.stdout)
+    assert status_payload["state"] == "ready"
+    assert status_payload["current"]["version"] == "1.0.0"
+    assert status_payload["previous"] is None
+
 
 def test_cli_requires_explicit_confirmation_outside_source_scope(tmp_path: Path) -> None:
     config_path = tmp_path / "distkeeper.yaml"
@@ -131,3 +142,20 @@ repositories:
         [*common, "publish", str(source), *arguments, "--confirm-outside-scope"],
     )
     assert confirmed.exit_code == 0, confirmed.output
+
+
+def test_json_error_includes_stable_code_and_retryability(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        _exit_with_error(ConflictError("release changed"), json_output=True)
+
+    assert raised.value.code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload == {
+        "schema_version": 1,
+        "ok": False,
+        "error": {
+            "code": "RELEASE_CONFLICT",
+            "message": "release changed",
+            "retryable": False,
+        },
+    }

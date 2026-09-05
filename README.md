@@ -53,6 +53,7 @@ uv run distkeeper publish dist/psygo.apk \
 
 ```bash
 uv run distkeeper list --repository psygo --target android
+uv run distkeeper --json status --repository psygo --target android
 uv run distkeeper tree
 uv run distkeeper tree Android --limit 500
 uv run distkeeper --json tree Android
@@ -60,6 +61,24 @@ uv run distkeeper verify --repository psygo --target android
 uv run distkeeper rollback \
   --repository psygo --target android --version 0.2.38
 ```
+
+面向 AI 或自动化调用时，先使用 `plan` 或 `rollback --dry-run`，再把返回的
+`plan_id` 传给实际变更命令。计划绑定了源文件摘要、当时的 latest 版本和对象指纹；
+如果执行前状态或输入发生变化，命令会失败并要求重新规划：
+
+```bash
+plan_json=$(uv run distkeeper --json plan dist/psygo.apk \
+  --repository psygo --target android --version 0.2.39)
+plan_id=$(python -c 'import json,sys; print(json.load(sys.stdin)["plan_id"])' <<<"$plan_json")
+uv run distkeeper --json publish dist/psygo.apk \
+  --repository psygo --target android --version 0.2.39 \
+  --plan-id "$plan_id"
+```
+
+所有变更前都应检查 `status`。如果不使用 `plan_id`，可以传入
+`--expected-current-version`，防止回退或发布覆盖已经变化的 latest。使用
+`--json` 时，业务错误也会返回带有 `code` 和 `retryable` 字段的 JSON；AI 应根据
+错误码决定重试、重新规划或请求确认。
 
 发布顺序为：写入不可变版本对象、写入版本清单、切换固定下载对象、最后写入 latest 清单。同一版本和同一 SHA-256 可以安全重试，同一版本对应不同内容会被拒绝。
 

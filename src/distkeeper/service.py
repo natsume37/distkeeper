@@ -18,6 +18,7 @@ from distkeeper.domain import (
     OperationPlan,
     PreparedArtifact,
     ReleaseManifest,
+    ReleaseStatus,
     VerificationItem,
     VerificationReport,
 )
@@ -94,7 +95,11 @@ class ReleaseService:
             self._assert_manifest_equivalent(existing_manifest, candidate)
             actions.append(f"reuse version manifest: {prepared.paths.version_manifest}")
 
-        latest_action = "replace" if self._storage.stat(prepared.paths.latest) else "create"
+        current_version, current_etag, latest_exists = self._current_state(
+            latest_key=prepared.paths.latest,
+            latest_manifest_key=prepared.paths.latest_manifest,
+        )
+        latest_action = "replace" if latest_exists else "create"
         actions.extend(
             (
                 f"{latest_action} latest artifact: {prepared.paths.latest}",
@@ -109,6 +114,10 @@ class ReleaseService:
             version=version,
             actions=tuple(actions),
             scope_violations=scope_violations,
+            expected_current_version=current_version,
+            expected_current_etag=current_etag,
+            source_sha256=prepared.sha256,
+            source_size=prepared.size,
         )
 
     def publish(
@@ -120,6 +129,8 @@ class ReleaseService:
         version: str,
         channel: str = "stable",
         confirm_outside_scope: bool = False,
+        plan_id: str | None = None,
+        expected_current_version: str | None = None,
     ) -> ReleaseManifest:
         self._require_scope(
             self._source_scope_violations(source),
@@ -137,6 +148,31 @@ class ReleaseService:
             self._scope_violations(source=prepared.source, paths=prepared.paths),
             confirmed=confirm_outside_scope,
         )
+        if plan_id is not None:
+            plan = self.plan_publish(
+                source,
+                repository=repository,
+                target=target,
+                version=version,
+                channel=channel,
+            )
+            if plan.plan_id != plan_id:
+                raise ConflictError(
+                    f"plan {plan_id!r} is stale; current plan is {plan.plan_id!r}"
+                )
+            self._assert_expected_current_state(
+                latest_key=prepared.paths.latest,
+                latest_manifest_key=prepared.paths.latest_manifest,
+                expected_version=plan.expected_current_version,
+                expected_etag=plan.expected_current_etag,
+            )
+        elif expected_current_version is not None:
+            self._assert_expected_current_state(
+                latest_key=prepared.paths.latest,
+                latest_manifest_key=prepared.paths.latest_manifest,
+                expected_version=expected_current_version,
+                expected_etag=None,
+            )
         metadata = self._metadata(candidate)
         self._assert_local_source_unchanged(prepared)
 
@@ -317,6 +353,49 @@ class ReleaseService:
         releases.sort(key=self._version_sort_key, reverse=True)
         return releases
 
+    def status(
+        self,
+        *,
+        repository: str,
+        target: str,
+        channel: str = "stable",
+    ) -> ReleaseStatus:
+        """Return active release and rollback-candidate state without changing storage."""
+        resolved = self._config.resolve(repository, target, channel)
+        releases = self.list_releases(
+            repository=repository,
+            target=target,
+            channel=channel,
+        )
+        current = self._optional_manifest(resolved.latest_manifest_key())
+        previous = None
+        if current is not None:
+            previous = next((item for item in releases if item.version != current.version), None)
+
+        versioned_exists: bool | None = None
+        latest_exists: bool | None = None
+        if current is not None:
+            versioned_exists = self._storage.stat(current.artifact.key) is not None
+            latest_exists = self._storage.stat(current.artifact.latest_key) is not None
+
+        if current is None and not releases:
+            state = "empty"
+        elif current is not None and versioned_exists and latest_exists:
+            state = "ready"
+        else:
+            state = "degraded"
+        return ReleaseStatus(
+            repository=repository,
+            target=target,
+            channel=channel,
+            state=state,
+            current=current,
+            previous=previous,
+            available_versions=tuple(item.version for item in releases),
+            current_versioned_exists=versioned_exists,
+            current_latest_exists=latest_exists,
+        )
+
     def plan_rollback(
         self,
         *,
@@ -332,6 +411,10 @@ class ReleaseService:
             channel=channel,
         )
         paths = resolved.paths(version, manifest.artifact.extension)
+        current_version, current_etag, _ = self._current_state(
+            latest_key=paths.latest,
+            latest_manifest_key=paths.latest_manifest,
+        )
         scope_violations = self._scope_violations(source=None, paths=paths)
         source = self._storage.stat(manifest.artifact.key)
         if source is None:
@@ -354,6 +437,10 @@ class ReleaseService:
                 f"write latest manifest: {paths.latest_manifest}",
             ),
             scope_violations=scope_violations,
+            expected_current_version=current_version,
+            expected_current_etag=current_etag,
+            source_sha256=manifest.artifact.sha256,
+            source_size=manifest.artifact.size,
         )
 
     def rollback(
@@ -364,6 +451,8 @@ class ReleaseService:
         version: str,
         channel: str = "stable",
         confirm_outside_scope: bool = False,
+        plan_id: str | None = None,
+        expected_current_version: str | None = None,
     ) -> ReleaseManifest:
         resolved, manifest = self._release_by_version(
             repository=repository,
@@ -372,6 +461,27 @@ class ReleaseService:
             channel=channel,
         )
         paths = resolved.paths(version, manifest.artifact.extension)
+        expected_current_etag: str | None = None
+        if plan_id is not None:
+            plan = self.plan_rollback(
+                repository=repository,
+                target=target,
+                version=version,
+                channel=channel,
+            )
+            if plan.plan_id != plan_id:
+                raise ConflictError(
+                    f"plan {plan_id!r} is stale; current plan is {plan.plan_id!r}"
+                )
+            expected_current_version = plan.expected_current_version
+            expected_current_etag = plan.expected_current_etag
+        if plan_id is not None or expected_current_version is not None:
+            self._assert_expected_current_state(
+                latest_key=paths.latest,
+                latest_manifest_key=paths.latest_manifest,
+                expected_version=expected_current_version,
+                expected_etag=expected_current_etag,
+            )
         self._require_scope(
             self._scope_violations(source=None, paths=paths),
             confirmed=confirm_outside_scope,
@@ -649,6 +759,42 @@ class ReleaseService:
         if self._storage.stat(key) is None:
             return None
         return self._required_manifest(key)
+
+    def _current_state(
+        self,
+        *,
+        latest_key: str,
+        latest_manifest_key: str,
+    ) -> tuple[str | None, str | None, bool]:
+        """Read the activation state used to bind plans to one storage snapshot."""
+        latest_manifest = self._optional_manifest(latest_manifest_key)
+        latest_info = self._storage.stat(latest_key)
+        return (
+            latest_manifest.version if latest_manifest is not None else None,
+            latest_info.etag if latest_info is not None else None,
+            latest_info is not None,
+        )
+
+    def _assert_expected_current_state(
+        self,
+        *,
+        latest_key: str,
+        latest_manifest_key: str,
+        expected_version: str | None,
+        expected_etag: str | None,
+    ) -> None:
+        actual_version, actual_etag, _ = self._current_state(
+            latest_key=latest_key,
+            latest_manifest_key=latest_manifest_key,
+        )
+        if actual_version != expected_version or (
+            expected_etag is not None and actual_etag != expected_etag
+        ):
+            raise ConflictError(
+                "latest release changed since planning: "
+                f"expected version={expected_version!r}, etag={expected_etag!r}; "
+                f"actual version={actual_version!r}, etag={actual_etag!r}"
+            )
 
     def _required_manifest(self, key: str) -> ReleaseManifest:
         if self._storage.stat(key) is None:

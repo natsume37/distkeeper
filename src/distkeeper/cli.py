@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -15,7 +16,7 @@ from rich.tree import Tree
 
 from distkeeper.config import AppConfig, load_config
 from distkeeper.directory import DirectoryListing, DirectoryNode, DirectoryService
-from distkeeper.domain import OperationPlan, ReleaseManifest, VerificationReport
+from distkeeper.domain import OperationPlan, ReleaseManifest, ReleaseStatus, VerificationReport
 from distkeeper.errors import DistkeeperError
 from distkeeper.service import ReleaseService
 from distkeeper.storage.base import Storage
@@ -96,6 +97,14 @@ def publish(
             help="Confirm a source or destination outside the configured allowlist.",
         ),
     ] = False,
+    plan_id: Annotated[
+        str | None,
+        typer.Option("--plan-id", help="Apply only the exact plan returned by plan."),
+    ] = None,
+    expected_current_version: Annotated[
+        str | None,
+        typer.Option("--expected-current-version", help="Abort if latest changed."),
+    ] = None,
 ) -> None:
     """Publish an immutable version and update its fixed latest path."""
     state, service = _service(ctx)
@@ -116,6 +125,8 @@ def publish(
         version=version,
         channel=channel,
         confirm_outside_scope=confirm_outside_scope,
+        plan_id=plan_id,
+        expected_current_version=expected_current_version,
     )
     _emit_manifest(manifest, state, heading="Published")
 
@@ -200,6 +211,26 @@ def list_releases_command(
     console.print(table)
 
 
+@app.command()
+def status(
+    ctx: typer.Context,
+    repository: Annotated[str, typer.Option("--repository", "-r")],
+    target: Annotated[str, typer.Option("--target", "-t")],
+    channel: Annotated[str, typer.Option("--channel")] = "stable",
+) -> None:
+    """Show the active release and the best available rollback candidate."""
+    state, service = _service(ctx)
+    release_status = service.status(
+        repository=repository,
+        target=target,
+        channel=channel,
+    )
+    if state.json_output:
+        _print_json(release_status.model_dump(mode="json"))
+        return
+    _emit_status(release_status)
+
+
 @app.command("tree")
 def directory_tree_command(
     ctx: typer.Context,
@@ -240,6 +271,14 @@ def rollback(
             help="Confirm a destination outside the configured allowlist.",
         ),
     ] = False,
+    plan_id: Annotated[
+        str | None,
+        typer.Option("--plan-id", help="Apply only the exact plan returned by --dry-run."),
+    ] = None,
+    expected_current_version: Annotated[
+        str | None,
+        typer.Option("--expected-current-version", help="Abort if latest changed."),
+    ] = None,
 ) -> None:
     """Point the fixed latest path at a previous immutable version."""
     state, service = _service(ctx)
@@ -258,6 +297,8 @@ def rollback(
         version=version,
         channel=channel,
         confirm_outside_scope=confirm_outside_scope,
+        plan_id=plan_id,
+        expected_current_version=expected_current_version,
     )
     _emit_manifest(manifest, state, heading="Rolled back")
 
@@ -309,13 +350,19 @@ def _emit_plan(plan_result: OperationPlan, state: CliState) -> None:
     if state.json_output:
         _print_json(
             {
+                "schema_version": 1,
                 "operation": plan_result.operation,
                 "repository": plan_result.repository,
                 "target": plan_result.target,
                 "version": plan_result.version,
+                "plan_id": plan_result.plan_id,
                 "actions": plan_result.actions,
                 "scope_violations": plan_result.scope_violations,
                 "requires_confirmation": plan_result.requires_confirmation,
+                "expected_current_version": plan_result.expected_current_version,
+                "expected_current_etag": plan_result.expected_current_etag,
+                "source_sha256": plan_result.source_sha256,
+                "source_size": plan_result.source_size,
             }
         )
         return
@@ -381,6 +428,26 @@ def _emit_verification(report: VerificationReport, state: CliState) -> None:
     console.print(table)
 
 
+def _emit_status(release_status: ReleaseStatus) -> None:
+    table = Table(
+        title=f"Status: {release_status.repository} / {release_status.target} / "
+        f"{release_status.channel}"
+    )
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("State", release_status.state)
+    table.add_row(
+        "Current",
+        release_status.current.version if release_status.current is not None else "none",
+    )
+    table.add_row(
+        "Previous",
+        release_status.previous.version if release_status.previous is not None else "none",
+    )
+    table.add_row("Available", ", ".join(release_status.available_versions) or "none")
+    console.print(table)
+
+
 def _emit_directory_tree(listing: DirectoryListing, state: CliState) -> None:
     if state.json_output:
         _print_json(listing.model_dump(mode="json"))
@@ -425,7 +492,19 @@ def _status(value: bool) -> str:
     return "OK" if value else "FAILED"
 
 
-def _exit_with_error(error: DistkeeperError) -> NoReturn:
+def _exit_with_error(error: DistkeeperError, *, json_output: bool = False) -> NoReturn:
+    if json_output:
+        payload = {
+            "schema_version": 1,
+            "ok": False,
+            "error": {
+                "code": error.code,
+                "message": str(error),
+                "retryable": error.retryable,
+            },
+        }
+        error_console.print_json(json.dumps(payload, ensure_ascii=False))
+        raise SystemExit(1)
     error_console.print(f"[red]error:[/red] {error}")
     raise SystemExit(1)
 
@@ -434,4 +513,4 @@ def main() -> None:
     try:
         app()
     except DistkeeperError as exc:
-        _exit_with_error(exc)
+        _exit_with_error(exc, json_output="--json" in sys.argv[1:])
