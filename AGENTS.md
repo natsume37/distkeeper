@@ -1,5 +1,13 @@
 # Repository Guidelines
 
+## Repository Purpose and Development Model
+
+This repository owns `distkeeper`, a Python 3.12+ CLI for publishing, adopting,
+rolling back, and verifying release artifacts in local storage or Alibaba Cloud
+OSS. It is a personal local repository rather than a shared multi-team codebase.
+Develop directly on the `main` branch; do not create feature branches unless a
+task explicitly requires one.
+
 ## Project Structure & Module Organization
 
 This is a Python 3.12+ CLI for versioning release artifacts in object storage.
